@@ -1,21 +1,16 @@
 cmake_minimum_required(VERSION 3.14.0)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
-message("CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH}")
 
 find_program(CCACHE_PROGRAM ccache)
 if (CCACHE_PROGRAM)
 	set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
 endif()
 
-
 project(bayesmix)
 
 set (CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -msse2 -funroll-loops -ftree-vectorize -fopenmp")
-set(CMAKE_FIND_PACKAGE_PREFER_CONFIG TRUE)
-
-option(DISABLE_TESTS
-      "If tests should be compiled or no" OFF)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -msse2 -funroll-loops
+  -ftree-vectorize -fopenmp")
 
 include(FindPythonInterp)
 add_custom_target(
@@ -104,6 +99,9 @@ foreach(PROTO_FILE IN LISTS ProtoFiles)
 endforeach()
 
 SET_SOURCE_FILES_PROPERTIES(${PROTO_SRCS} ${PROTO_HDRS} PROPERTIES GENERATED TRUE)
+set(LINK_LIBRARIES ${CMAKE_CURRENT_LIST_DIR}/lib/math/lib/tbb/libtbb.so pthread
+  protobuf)
+set(COMPILE_OPTIONS -D_REENTRANT -fPIC)
 
 get_directory_property(HAS_PARENT PARENT_DIRECTORY)
 if(HAS_PARENT)
@@ -130,11 +128,10 @@ add_dependencies(bayesmixlib build_tbb)
 
 
 # Build run executable
-add_executable(run $<TARGET_OBJECTS:bayesmix> run.cpp)
+add_executable(run $<TARGET_OBJECTS:bayesmix> run.cc)
 target_include_directories(run PUBLIC ${INCLUDE_PATHS})
 target_link_libraries(run PUBLIC ${LINK_LIBRARIES})
 target_compile_options(run PUBLIC ${COMPILE_OPTIONS})
-
 
 if (NOT DISABLE_TESTS)
   add_subdirectory(test)
