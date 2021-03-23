@@ -56,4 +56,5 @@ message SemiHdpParams {
 
   WPriorParams w_prior = 6;
 
+  double truncation_error = 7;
 }

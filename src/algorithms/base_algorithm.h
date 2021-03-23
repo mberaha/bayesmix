@@ -116,7 +116,7 @@ class BaseAlgorithm {
   virtual bool is_conditional() const = 0;
 
   //! Runs the algorithm and saves the whole chain to a collector
-  void run(BaseCollector *collector) {
+  void run(BaseCollector *collector, bool log = true) {
     initialize();
     print_startup_message();
     unsigned int iter = 0;
@@ -129,8 +129,11 @@ class BaseAlgorithm {
         save_state(collector, iter);
       }
       iter++;
-      ++bar;
-      bar.display();
+
+      if (log) {
+        ++bar;
+        bar.display();
+      }
     }
     collector->finish_collecting();
     bar.done();

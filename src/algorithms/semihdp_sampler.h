@@ -75,6 +75,12 @@ class SemiHdpSampler {
 
   bool adapt = false;
 
+  std::vector<Eigen::VectorXd> conditional_weights;
+  std::vector<std::vector<std::shared_ptr<AbstractHierarchy>>>
+      conditional_atoms;
+  Eigen::VectorXd shared_conditional_weights;
+  std::vector<std::shared_ptr<AbstractHierarchy>> shared_conditional_atoms;
+
  public:
   virtual bool requires_conjugate_hierarchy() const { return true; }
 
@@ -89,7 +95,7 @@ class SemiHdpSampler {
 
   void step() {
     update_unique_vals();
-    update_semihdp_weight();
+    // update_semihdp_weight();
     if (!adapt) {
       sample_pseudo_prior();
       update_rest_allocs();
@@ -124,7 +130,7 @@ class SemiHdpSampler {
       adapt = false;
     }
 
-    print_debug_string();
+    // print_debug_string();
     sample_pseudo_prior();
 
     std::cout << "Beginning" << std::endl;
@@ -150,12 +156,15 @@ class SemiHdpSampler {
   void update_rest_allocs();
   void update_semihdp_weight();
   void update_dirichlet_concentration();
+  void sample_conditional_measures();
 
   void relabel();
   void sample_pseudo_prior();
   void perturb(bayesmix::AlgorithmState::ClusterState *out);
 
-  double lpdf_for_group(int i, int r);
+  double lpdf_for_group_conditional(int i, int r);
+  double lpdf_for_group_marginal(int i, int r);
+
   void reassign_group(int i, int new_r, int old_r);
 
   Eigen::VectorXd _compute_mixture_distance(int i);
@@ -216,6 +225,8 @@ class SemiHdpSampler {
   void print_debug_string() const;
 
   void check();
+
+  void set_adapt(bool adapt_) { adapt = adapt_; }
 };
 
 #endif  // SRC_ALGORITHMS_SEMIHDP_SAMPLER_H

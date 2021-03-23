@@ -4,6 +4,8 @@
 #include <vector>
 
 #include "algorithm_state.pb.h"
+#include "src/hierarchies/nnig_hierarchy.h"
+#include "src/mixings/truncated_sb_mixing.h"
 #include "src/utils/distributions.h"
 #include "src/utils/eigen_utils.h"
 
@@ -16,6 +18,7 @@ SemiHdpSampler::SemiHdpSampler(const std::vector<Eigen::MatrixXd>& data,
   for (int i = 0; i < ngroups; i++) n_by_group[i] = data[i].size();
   G0_master_hierarchy = hier->clone();
   G00_master_hierarchy = hier->clone();
+  G0_master_hierarchy->sample_prior();
   totalmass_rest = params.totalmass_rest();
   totalmass_hdp = params.totalmass_hdp();
 }
@@ -38,13 +41,17 @@ void SemiHdpSampler::initialize() {
   n_by_table.resize(ngroups);
   rest_tables_pseudo.resize(ngroups);
   n_by_table_pseudo.resize(ngroups);
+  conditional_weights.resize(ngroups);
+  conditional_atoms.resize(ngroups);
 
-  for (int l = 0; l < INIT_N_CLUS; l++) {
-    std::shared_ptr<AbstractHierarchy> hierarchy =
-        G00_master_hierarchy->clone();
-    hierarchy->sample_prior();
-    shared_tables.push_back(hierarchy);
-  }
+  semihdp_weight = 1.0;
+
+  // for (int l = 0; l < INIT_N_CLUS; l++) {
+  //   std::shared_ptr<AbstractHierarchy> hierarchy =
+  //       G00_master_hierarchy->clone();
+  //   hierarchy->sample_prior();
+  //   shared_tables.push_back(hierarchy);
+  // }
 
   for (int i = 0; i < ngroups; i++) {
     rest_allocs[i] = i;
@@ -56,8 +63,11 @@ void SemiHdpSampler::initialize() {
       table_allocs[i][j] = bayesmix::categorical_rng(probas, rng);
     }
 
-    table_to_private[i].resize(2 * INIT_N_CLUS);
-    table_to_shared[i].resize(2 * INIT_N_CLUS);
+    // table_to_private[i].resize(2 * INIT_N_CLUS);
+    // table_to_shared[i].resize(2 * INIT_N_CLUS);
+
+    table_to_private[i].resize(INIT_N_CLUS);
+    table_to_shared[i].resize(INIT_N_CLUS);
 
     for (int l = 0; l < INIT_N_CLUS; l++) {
       std::shared_ptr<AbstractHierarchy> hierarchy =
@@ -69,11 +79,11 @@ void SemiHdpSampler::initialize() {
       table_to_shared[i][l] = -1;
     }
 
-    for (int l = 0; l < INIT_N_CLUS; l++) {
-      rest_tables[i].push_back(shared_tables[l]);
-      table_to_private[i][INIT_N_CLUS + l] = -1;
-      table_to_shared[i][INIT_N_CLUS + l] = l;
-    }
+    // for (int l = 0; l < INIT_N_CLUS; l++) {
+    //   rest_tables[i].push_back(shared_tables[l]);
+    //   table_to_private[i][INIT_N_CLUS + l] = -1;
+    //   table_to_shared[i][INIT_N_CLUS + l] = l;
+    // }
   }
   cnt_shared_tables = std::vector<int>(shared_tables.size(), 0);
 
@@ -106,13 +116,21 @@ void SemiHdpSampler::update_unique_vals() {
       }
     }
 
+    // std::cout << "r: " << r << ", "
+    //           << "private_tables: " << private_tables[r].size()
+    //           << ", table_to_private: " << table_to_private[r].size()
+    //           << ", rest_tables: " << rest_tables[r].size() << std::endl;
+
     for (int l = 0; l < rest_tables[r].size(); l++) {
       if (table_to_private[r][l] >= 0) {
         if (data_by_theta_star[l].rows() > 0)
           private_tables[r][table_to_private[r][l]]->sample_full_cond(
               data_by_theta_star[l]);
-        else
+        else {
+          // std::cout << "about to sample prior, l = " << l << std::endl;
           private_tables[r][table_to_private[r][l]]->sample_prior();
+          // std::cout << "sample prior done" << std::endl;
+        }
         rest_tables[r][l] = private_tables[r][table_to_private[r][l]];
       } else {
         bayesmix::append_by_row(&data_by_shared[table_to_shared[r][l]],
@@ -181,7 +199,7 @@ void SemiHdpSampler::update_table_allocs() {
 
       Eigen::VectorXd probas =
           Eigen::VectorXd::Zero(rest_tables[r].size() + 1);
-#pragma omp parallel for
+      // #pragma omp parallel for
       for (int l = 0; l < rest_tables[r].size(); l++) {
         double log_n = log_n_by_table[r][l];
         probas[l] = log_n + rest_tables[r][l]->like_lpdf(data[i].row(j));
@@ -191,7 +209,7 @@ void SemiHdpSampler::update_table_allocs() {
           logw + G0_master_hierarchy->prior_pred_lpdf(data[i].row(j));
 
       Eigen::VectorXd hdp_contribs(shared_tables.size() + 1);
-#pragma omp parallel for
+      // #pragma omp parallel for
       for (int h = 0; h < shared_tables.size(); h++) {
         double logm = log_m[h];
         hdp_contribs[h] =
@@ -205,13 +223,18 @@ void SemiHdpSampler::update_table_allocs() {
       Eigen::VectorXd marg(2);
       marg << margG0, margHDP;
       probas[rest_tables[r].size()] = logalpha + stan::math::log_sum_exp(marg);
+      // std::cout << "probas: " << probas.transpose() << std::endl;
+      probas = stan::math::softmax(probas);
+      // std::cout << "probas: " << probas.transpose() << std::endl;
+      // std::cout << "marg: " << marg.transpose() << std::endl;
 
-      int snew = bayesmix::categorical_rng(stan::math::softmax(probas), rng);
+      int snew = bayesmix::categorical_rng(probas, rng);
       table_allocs[i][j] = snew;
       if (snew < rest_tables[r].size()) {
         n_by_table[r][snew] += 1;
         log_n_by_table[r][snew] = std::log(1.0 * n_by_table[r][snew]);
       } else {
+        // std::cout << "CREATING NEW TABLE!" << std::endl;
         n_by_table[r].push_back(1);
         log_n_by_table[r].push_back(0);
         if (stan::math::uniform_rng(0, 1, rng) < semihdp_weight) {
@@ -309,6 +332,7 @@ void SemiHdpSampler::update_to_shared() {
 
 void SemiHdpSampler::update_rest_allocs() {
   auto& rng = bayesmix::Rng::Instance().get();
+  sample_conditional_measures();
   for (int i = 0; i < ngroups; i++) {
     int curr_r = rest_allocs[i];
     int new_r = curr_r;
@@ -318,9 +342,12 @@ void SemiHdpSampler::update_rest_allocs() {
 // Compute probability for group change
 #pragma omp parallel for
       for (int r = 0; r < ngroups; r++)
-        probas(r) =
-            lpdf_for_group(i, r) + std::log(dirichlet_concentration(r));
+        probas(r) = lpdf_for_group_conditional(i, r) +
+                    std::log(dirichlet_concentration(r));
+      // std::cout << "probas: " << probas.transpose() << std::endl;
       probas = stan::math::softmax(probas);
+      // std::cout << "probas: " << probas.transpose() << std::endl;
+
       new_r = bayesmix::categorical_rng(probas, rng);
     } else {
       int prop_r = curr_r;
@@ -332,13 +359,14 @@ void SemiHdpSampler::update_rest_allocs() {
         Eigen::VectorXd proposal_weights = Eigen::VectorXd::Ones(ngroups);
         for (int r = 0; r < ngroups; r++)
           proposal_weights[r] += 0.1 / (0.0001 + dists(r));
+        proposal_weights[curr_r] = 0.0;
         proposal_weights /= proposal_weights.sum();
         prop_r = bayesmix::categorical_rng(proposal_weights, rng);
       }
 
-      double num = lpdf_for_group(i, prop_r) +
+      double num = lpdf_for_group_marginal(i, prop_r) +
                    std::log(dirichlet_concentration(prop_r));
-      double den = lpdf_for_group(i, curr_r) +
+      double den = lpdf_for_group_marginal(i, curr_r) +
                    std::log(dirichlet_concentration(curr_r));
 
       if (std::log(stan::math::uniform_rng(0, 1, rng)) < num - den) {
@@ -350,6 +378,9 @@ void SemiHdpSampler::update_rest_allocs() {
       reassign_group(i, new_r, curr_r);
     }
   }
+  // std::cout << "rest_allocs: ";
+  // for (auto& c : rest_allocs) std::cout << c << ", ";
+  // std::cout << std::endl;
 }
 
 void SemiHdpSampler::update_semihdp_weight() {
@@ -464,6 +495,140 @@ void SemiHdpSampler::relabel() {
   _count_m();
 }
 
+void SemiHdpSampler::sample_conditional_measures() {
+  // std::cout << "sample_conditional_measures" << std::endl;
+  // std::cout << "rest_allocs: ";
+  // for (auto& c : rest_allocs) std::cout << c << ", ";
+  // std::cout << std::endl;
+
+  _count_n_by_theta_star();
+  _count_m();
+
+  auto& rng = bayesmix::Rng::Instance().get();
+  // First sample Gtilde
+  Eigen::VectorXd dir_concentration(shared_tables.size() + 1);
+  for (int i = 0; i < shared_tables.size(); i++) {
+    dir_concentration(i) = cnt_shared_tables[i];
+  }
+  dir_concentration(shared_tables.size()) = totalmass_hdp;
+  Eigen::VectorXd weights = stan::math::dirichlet_rng(dir_concentration, rng);
+
+  TruncatedSBMixing hdp_cond_mixing;
+  bayesmix::TruncSBPrior* hdp_mix_prior =
+      google::protobuf::internal::down_cast<bayesmix::TruncSBPrior*>(
+          hdp_cond_mixing.get_mutable_prior());
+  hdp_mix_prior->mutable_dp_prior()->set_totalmass(totalmass_hdp);
+  hdp_mix_prior->set_num_components(10);
+  hdp_cond_mixing.initialize();
+
+  shared_conditional_weights.resize(weights.size() - 1 + 10);
+  shared_conditional_weights.head(weights.size() - 1) =
+      weights.head(weights.size() - 1);
+
+  shared_conditional_weights.tail(10) =
+      hdp_cond_mixing.get_weights(false, false) * weights(weights.size() - 1);
+
+  shared_conditional_atoms.resize(shared_conditional_weights.size());
+  for (int i = 0; i < shared_tables.size(); i++) {
+    shared_conditional_atoms[i] = shared_tables[i]->clone();
+  }
+  for (int i = shared_tables.size(); i < shared_conditional_weights.size();
+       i++) {
+    shared_conditional_atoms[i] = G00_master_hierarchy->clone();
+    shared_conditional_atoms[i]->sample_prior();
+  }
+
+  // std::cout << "dirichlet weights: " << dir_concentration.transpose()
+  //           << std::endl;
+  // std::cout << "unique values: ";
+  // for (int i = 0; i < shared_tables.size(); i++) {
+  //   std::shared_ptr<NNIGHierarchy> atom_ptr;
+  //   atom_ptr = std::dynamic_pointer_cast<NNIGHierarchy>(shared_tables[i]);
+  //   std::cout << "(" << atom_ptr->get_state().mean << ", "
+  //             << atom_ptr->get_state().var << ")     ";
+  // }
+  // std::cout << std::endl;
+  // std::cout << "Gtilde: " << std::endl;
+  // for (int i = 0; i < shared_conditional_weights.size(); i++) {
+  //   std::shared_ptr<NNIGHierarchy> atom_ptr;
+  //   atom_ptr =
+  //       std::dynamic_pointer_cast<NNIGHierarchy>(shared_conditional_atoms[i]);
+  //   std::cout << "w: " << shared_conditional_weights(i) << ", atom: ("
+  //             << atom_ptr->get_state().mean << ", "
+  //             << atom_ptr->get_state().var << ")" << std::endl;
+  // }
+
+  for (int r = 0; r < ngroups; r++) {
+    // std::cout << "is_used_rest: " << is_used_rest[r] << std::endl;
+    std::vector<int> table_cnts =
+        is_used_rest[r] ? n_by_table[r] : n_by_table_pseudo[r];
+    std::vector<std::shared_ptr<AbstractHierarchy>> table_vals =
+        is_used_rest[r] ? rest_tables[r] : rest_tables_pseudo[r];
+    // std::cout << "table_cnts: " << table_cnts.size()
+    //           << ", table_vals: " << table_vals.size() << std::endl;
+
+    dir_concentration.resize(table_cnts.size() + 1);
+    for (int i = 0; i < table_vals.size(); i++) {
+      dir_concentration(i) = table_cnts[i];
+    }
+    dir_concentration(table_cnts.size()) = totalmass_rest;
+    weights = stan::math::dirichlet_rng(dir_concentration, rng);
+
+    TruncatedSBMixing rest_cond_mixing;
+    bayesmix::TruncSBPrior* rest_mix_prior =
+        google::protobuf::internal::down_cast<bayesmix::TruncSBPrior*>(
+            rest_cond_mixing.get_mutable_prior());
+
+    rest_mix_prior->mutable_dp_prior()->set_totalmass(totalmass_rest);
+    rest_mix_prior->set_num_components(10);
+    rest_cond_mixing.initialize();
+
+    conditional_weights[r].resize(weights.size() - 1 + 10);
+    conditional_weights[r].head(weights.size() - 1) =
+        weights.head(weights.size() - 1);
+    conditional_weights[r].tail(10) =
+        rest_cond_mixing.get_weights(false, false) *
+        weights(weights.size() - 1);
+
+    conditional_atoms[r].resize(conditional_weights[r].size());
+    for (int i = 0; i < table_cnts.size(); i++) {
+      conditional_atoms[r][i] = table_vals[i]->clone();
+    }
+    for (int i = table_cnts.size(); i < conditional_weights[r].size(); i++) {
+      bool to_idio = stan::math::bernoulli_rng(semihdp_weight, rng);
+      if (to_idio) {
+        conditional_atoms[r][i] = G0_master_hierarchy->clone();
+        conditional_atoms[r][i]->sample_prior();
+      } else {
+        int comp = bayesmix::categorical_rng(shared_conditional_weights, rng);
+        conditional_atoms[r][i] = shared_conditional_atoms[comp]->clone();
+      }
+    }
+
+    // std::cout << "dirichlet weights: " << dir_concentration.transpose()
+    //           << std::endl;
+    // std::cout << "unique values: ";
+    // for (int i = 0; i < rest_tables[r].size(); i++) {
+    //   std::shared_ptr<NNIGHierarchy> atom_ptr;
+    //   atom_ptr =
+    //   std::dynamic_pointer_cast<NNIGHierarchy>(rest_tables[r][i]); std::cout
+    //   << "(" << atom_ptr->get_state().mean << ", "
+    //             << atom_ptr->get_state().var << ")     ";
+    // }
+    // std::cout << std::endl;
+    // std::cout << "F_r: " << std::endl;
+    // for (int i = 0; i < conditional_weights[r].size(); i++) {
+    //   std::shared_ptr<NNIGHierarchy> atom_ptr;
+    //   atom_ptr =
+    //       std::dynamic_pointer_cast<NNIGHierarchy>(conditional_atoms[r][i]);
+    //   std::cout << "w: " << conditional_weights[r](i) << ", atom: ("
+    //             << atom_ptr->get_state().mean << ", "
+    //             << atom_ptr->get_state().var << ")" << std::endl;
+    // }
+  }
+  // std::cout << "sample_conditional_measures DONE" << std::endl;
+}
+
 void SemiHdpSampler::sample_pseudo_prior() {
   auto& rng = bayesmix::Rng::Instance().get();
   Eigen::VectorXd probas =
@@ -493,7 +658,7 @@ void SemiHdpSampler::sample_pseudo_prior() {
     rest_tables_pseudo[r].resize(0);
     for (int l = 0; l < state.cluster_states_size(); l++) {
       bayesmix::AlgorithmState::ClusterState clusval = state.cluster_states(l);
-      // perturb(&clusval);
+      perturb(&clusval);
       std::shared_ptr<AbstractHierarchy> curr_clus =
           G0_master_hierarchy->clone();
       curr_clus->set_state_from_proto(clusval);
@@ -521,7 +686,7 @@ void SemiHdpSampler::perturb(bayesmix::AlgorithmState::ClusterState* out) {
   }
 }
 
-double SemiHdpSampler::lpdf_for_group(int i, int r) {
+double SemiHdpSampler::lpdf_for_group_marginal(int i, int r) {
   Eigen::VectorXd lpdf_data(n_by_group[i]);
   Eigen::MatrixXd lpdf_local;
   if (is_used_rest[r]) {
@@ -532,6 +697,12 @@ double SemiHdpSampler::lpdf_for_group(int i, int r) {
                           rest_tables[r][h]
                               ->like_lpdf_grid(data[i], Eigen::MatrixXd(0, 0))
                               .array();
+      std::shared_ptr<NNIGHierarchy> atom_ptr;
+      atom_ptr = std::dynamic_pointer_cast<NNIGHierarchy>(rest_tables[r][h]);
+      // std::cout << "(" << atom_ptr->get_state().mean << ", "
+      //           << atom_ptr->get_state().var << ")     ";
+      // std::cout << "lpdf_grid: " << lpdf_local.col(h).transpose() <<
+      // std::endl;
     }
 
   } else {
@@ -546,6 +717,31 @@ double SemiHdpSampler::lpdf_for_group(int i, int r) {
               .array();
     }
   }
+  for (int j = 0; j < n_by_group[i]; j++)
+    lpdf_data(j) = stan::math::log_sum_exp(lpdf_local.row(j));
+
+  return lpdf_data.sum();
+}
+
+double SemiHdpSampler::lpdf_for_group_conditional(int i, int r) {
+  Eigen::VectorXd lpdf_data(n_by_group[i]);
+  Eigen::MatrixXd lpdf_local;
+
+  lpdf_local.resize(n_by_group[i], conditional_atoms[r].size());
+  for (int h = 0; h < conditional_atoms[r].size(); h++) {
+    lpdf_local.col(h) = std::log(conditional_weights[r](h)) +
+                        conditional_atoms[r][h]
+                            ->like_lpdf_grid(data[i], Eigen::MatrixXd(0, 0))
+                            .array();
+    std::shared_ptr<NNIGHierarchy> atom_ptr;
+    atom_ptr =
+        std::dynamic_pointer_cast<NNIGHierarchy>(conditional_atoms[r][h]);
+    // std::cout << "(" << atom_ptr->get_state().mean << ", "
+    //           << atom_ptr->get_state().var << ")     ";
+    // std::cout << "lpdf_grid: " << lpdf_local.col(h).transpose() <<
+    // std::endl;
+  }
+
   for (int j = 0; j < n_by_group[i]; j++)
     lpdf_data(j) = stan::math::log_sum_exp(lpdf_local.row(j));
 
@@ -588,31 +784,27 @@ void SemiHdpSampler::reassign_group(int i, int new_r, int old_r) {
 
 Eigen::VectorXd SemiHdpSampler::_compute_mixture_distance(int i) {
   std::vector<bayesmix::AlgorithmState::ClusterState> clus1(
-      rest_tables[i].size());
-  Eigen::VectorXd weights1(rest_tables[i].size());
-  for (int l = 0; l < rest_tables[i].size(); l++) {
+      conditional_atoms[i].size());
+  Eigen::VectorXd weights1 = conditional_weights[i];
+  for (int l = 0; l < conditional_atoms[i].size(); l++) {
     bayesmix::AlgorithmState::ClusterState clus;
-    rest_tables[i][l]->write_state_to_proto(&clus);
+    conditional_atoms[i][l]->write_state_to_proto(&clus);
     clus1[l] = clus;
-    weights1(l) = n_by_table[i][l];
   }
-  weights1 = weights1.array() / weights1.sum();
+
   Eigen::VectorXd dists(ngroups);
 
   for (int r = 0; r < ngroups; r++) {
     std::vector<bayesmix::AlgorithmState::ClusterState> clus2(
-        rest_tables[r].size());
-    Eigen::VectorXd weights2(rest_tables[r].size());
-    for (int l = 0; l < rest_tables[r].size(); l++) {
+        conditional_atoms[r].size());
+    Eigen::VectorXd weights2 = conditional_weights[r];
+    for (int l = 0; l < conditional_atoms[r].size(); l++) {
       bayesmix::AlgorithmState::ClusterState clus;
-      rest_tables[r][l]->write_state_to_proto(&clus);
+      conditional_atoms[r][l]->write_state_to_proto(&clus);
       clus2[l] = clus;
-      weights2(l) = n_by_table[r][l];
     }
-    weights2 = weights2.array() / weights2.sum();
-
-    dists(r) =
-        bayesmix::gaussian_mixture_dist(clus1, weights1, clus2, weights2);
+    dists(r) = std::max(0.0, bayesmix::gaussian_mixture_dist(clus1, weights1,
+                                                             clus2, weights2));
   }
   return dists;
 }
@@ -662,16 +854,17 @@ bayesmix::SemiHdpState SemiHdpSampler::get_state_as_proto() {
     *curr_group.mutable_cluster_allocs() = {table_allocs[i].begin(),
                                             table_allocs[i].end()};
     state.add_groups()->CopyFrom(curr_group);
-
-    for (int l = 0; l < shared_tables.size(); l++) {
-      bayesmix::SemiHdpState::ClusterState clusval;
-      shared_tables[l]->write_state_to_proto(&clusval);
-      state.add_taus()->CopyFrom(clusval);
-    }
-
-    *state.mutable_c() = {rest_allocs.begin(), rest_allocs.end()};
-    state.set_w(semihdp_weight);
   }
+
+  for (int l = 0; l < shared_tables.size(); l++) {
+    bayesmix::SemiHdpState::ClusterState clusval;
+    shared_tables[l]->write_state_to_proto(&clusval);
+    state.add_taus()->CopyFrom(clusval);
+  }
+
+  *state.mutable_c() = {rest_allocs.begin(), rest_allocs.end()};
+  state.set_w(semihdp_weight);
+
   return state;
 }
 

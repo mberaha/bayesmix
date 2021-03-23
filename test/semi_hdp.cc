@@ -352,3 +352,35 @@ TEST(semihdp, sample_allocations1) {
   ASSERT_EQ(snew[0][1], 0);
   ASSERT_EQ(1, 1);
 }
+
+TEST(semihdp, sample_conditional) {
+  std::vector<Eigen::MatrixXd> data(2);
+
+  data[0] = bayesmix::vstack({Eigen::MatrixXd::Zero(50, 1).array() + 5,
+                              Eigen::MatrixXd::Zero(50, 1).array()});
+
+  data[1] = bayesmix::vstack({Eigen::MatrixXd::Zero(50, 1).array() - 5,
+                              Eigen::MatrixXd::Zero(50, 1).array() + 5});
+
+  SemiHdpSampler sampler(data, get_hierarchy(), get_params());
+  sampler.initialize();
+  sampler.set_adapt(true);
+
+  for (int i = 0; i < 100; i++) {
+    sampler.step();
+  }
+
+  sampler.print_debug_string();
+  sampler.sample_conditional_measures();
+
+  std::cout << "marginal_lpdfs : " << sampler.lpdf_for_group_marginal(0, 0)
+            << ", " << sampler.lpdf_for_group_marginal(0, 1) << ", "
+            << sampler.lpdf_for_group_marginal(1, 0) << ", "
+            << sampler.lpdf_for_group_marginal(1, 1) << std::endl;
+
+  std::cout << "conditional_lpdfs : "
+            << sampler.lpdf_for_group_conditional(0, 0) << ", "
+            << sampler.lpdf_for_group_conditional(0, 1) << ", "
+            << sampler.lpdf_for_group_conditional(1, 0) << ", "
+            << sampler.lpdf_for_group_conditional(1, 1) << std::endl;
+}

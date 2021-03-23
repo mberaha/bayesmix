@@ -8,8 +8,11 @@ endif()
 project(bayesmix)
 
 set (CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -msse2 -funroll-loops
-  -ftree-vectorize -fopenmp")
+set(CMAKE_BUILD_TYPE Debug)
+
+find_package(OpenMP REQUIRED)
+
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -msse2 -funroll-loops -ftree-vectorize -fopenmp")
 
 include(FindPythonInterp)
 add_custom_target(
@@ -39,7 +42,7 @@ set(INCLUDE_PATHS
 )
 
 set(LINK_LIBRARIES ${CMAKE_CURRENT_LIST_DIR}/lib/math/lib/tbb/libtbb.so pthread
-  protobuf)
+  protobuf OpenMP::OpenMP_CXX)
 set(COMPILE_OPTIONS -D_REENTRANT -fPIC)
 
 file(GLOB ProtoFiles "${BASEPATH}/proto/*.proto")
@@ -84,3 +87,5 @@ if (NOT DISABLE_TESTS)
   # Build test executable
   add_subdirectory(test)
 endif()
+
+add_subdirectory(scripts)
