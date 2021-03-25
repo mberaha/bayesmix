@@ -11,4 +11,5 @@ target_sources(bayesmix
     proto_utils.h
     proto_utils.cc
     rng.h
+    dirichlet_process.h
 )

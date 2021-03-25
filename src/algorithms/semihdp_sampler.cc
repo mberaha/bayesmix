@@ -6,6 +6,7 @@
 #include "algorithm_state.pb.h"
 #include "src/hierarchies/nnig_hierarchy.h"
 #include "src/mixings/truncated_sb_mixing.h"
+#include "src/utils/dirichlet_process.h"
 #include "src/utils/distributions.h"
 #include "src/utils/eigen_utils.h"
 
@@ -44,14 +45,14 @@ void SemiHdpSampler::initialize() {
   conditional_weights.resize(ngroups);
   conditional_atoms.resize(ngroups);
 
-  semihdp_weight = 1.0;
+  semihdp_weight = 0.5;
 
-  // for (int l = 0; l < INIT_N_CLUS; l++) {
-  //   std::shared_ptr<AbstractHierarchy> hierarchy =
-  //       G00_master_hierarchy->clone();
-  //   hierarchy->sample_prior();
-  //   shared_tables.push_back(hierarchy);
-  // }
+  for (int l = 0; l < INIT_N_CLUS; l++) {
+    std::shared_ptr<AbstractHierarchy> hierarchy =
+        G00_master_hierarchy->clone();
+    hierarchy->sample_prior();
+    shared_tables.push_back(hierarchy);
+  }
 
   for (int i = 0; i < ngroups; i++) {
     rest_allocs[i] = i;
@@ -63,11 +64,11 @@ void SemiHdpSampler::initialize() {
       table_allocs[i][j] = bayesmix::categorical_rng(probas, rng);
     }
 
-    // table_to_private[i].resize(2 * INIT_N_CLUS);
-    // table_to_shared[i].resize(2 * INIT_N_CLUS);
+    table_to_private[i].resize(2 * INIT_N_CLUS);
+    table_to_shared[i].resize(2 * INIT_N_CLUS);
 
-    table_to_private[i].resize(INIT_N_CLUS);
-    table_to_shared[i].resize(INIT_N_CLUS);
+    // table_to_private[i].resize(INIT_N_CLUS);
+    // table_to_shared[i].resize(INIT_N_CLUS);
 
     for (int l = 0; l < INIT_N_CLUS; l++) {
       std::shared_ptr<AbstractHierarchy> hierarchy =
@@ -79,11 +80,11 @@ void SemiHdpSampler::initialize() {
       table_to_shared[i][l] = -1;
     }
 
-    // for (int l = 0; l < INIT_N_CLUS; l++) {
-    //   rest_tables[i].push_back(shared_tables[l]);
-    //   table_to_private[i][INIT_N_CLUS + l] = -1;
-    //   table_to_shared[i][INIT_N_CLUS + l] = l;
-    // }
+    for (int l = 0; l < INIT_N_CLUS; l++) {
+      rest_tables[i].push_back(shared_tables[l]);
+      table_to_private[i][INIT_N_CLUS + l] = -1;
+      table_to_shared[i][INIT_N_CLUS + l] = l;
+    }
   }
   cnt_shared_tables = std::vector<int>(shared_tables.size(), 0);
 
@@ -504,62 +505,49 @@ void SemiHdpSampler::sample_conditional_measures() {
   _count_n_by_theta_star();
   _count_m();
 
+  DirichletProcess shared_dp(G00_master_hierarchy, totalmass_hdp);
+  shared_dp.set_unique_vals_and_cards(shared_tables, cnt_shared_tables);
+  shared_dp.simulate_full_conditional();
   auto& rng = bayesmix::Rng::Instance().get();
-  // First sample Gtilde
-  Eigen::VectorXd dir_concentration(shared_tables.size() + 1);
-  for (int i = 0; i < shared_tables.size(); i++) {
-    dir_concentration(i) = cnt_shared_tables[i];
-  }
-  dir_concentration(shared_tables.size()) = totalmass_hdp;
-  Eigen::VectorXd weights = stan::math::dirichlet_rng(dir_concentration, rng);
 
-  TruncatedSBMixing hdp_cond_mixing;
-  bayesmix::TruncSBPrior* hdp_mix_prior =
-      google::protobuf::internal::down_cast<bayesmix::TruncSBPrior*>(
-          hdp_cond_mixing.get_mutable_prior());
-  hdp_mix_prior->mutable_dp_prior()->set_totalmass(totalmass_hdp);
-  hdp_mix_prior->set_num_components(10);
-  hdp_cond_mixing.initialize();
-
-  shared_conditional_weights.resize(weights.size() - 1 + 10);
-  shared_conditional_weights.head(weights.size() - 1) =
-      weights.head(weights.size() - 1);
-
-  shared_conditional_weights.tail(10) =
-      hdp_cond_mixing.get_weights(false, false) * weights(weights.size() - 1);
-
-  shared_conditional_atoms.resize(shared_conditional_weights.size());
-  for (int i = 0; i < shared_tables.size(); i++) {
-    shared_conditional_atoms[i] = shared_tables[i]->clone();
-  }
-  for (int i = shared_tables.size(); i < shared_conditional_weights.size();
-       i++) {
-    shared_conditional_atoms[i] = G00_master_hierarchy->clone();
-    shared_conditional_atoms[i]->sample_prior();
-  }
-
-  // std::cout << "dirichlet weights: " << dir_concentration.transpose()
-  //           << std::endl;
-  // std::cout << "unique values: ";
+  // // First sample Gtilde
+  // Eigen::VectorXd dir_concentration(shared_tables.size() + 1);
   // for (int i = 0; i < shared_tables.size(); i++) {
-  //   std::shared_ptr<NNIGHierarchy> atom_ptr;
-  //   atom_ptr = std::dynamic_pointer_cast<NNIGHierarchy>(shared_tables[i]);
-  //   std::cout << "(" << atom_ptr->get_state().mean << ", "
-  //             << atom_ptr->get_state().var << ")     ";
+  //   dir_concentration(i) = cnt_shared_tables[i];
   // }
-  // std::cout << std::endl;
-  // std::cout << "Gtilde: " << std::endl;
-  // for (int i = 0; i < shared_conditional_weights.size(); i++) {
-  //   std::shared_ptr<NNIGHierarchy> atom_ptr;
-  //   atom_ptr =
-  //       std::dynamic_pointer_cast<NNIGHierarchy>(shared_conditional_atoms[i]);
-  //   std::cout << "w: " << shared_conditional_weights(i) << ", atom: ("
-  //             << atom_ptr->get_state().mean << ", "
-  //             << atom_ptr->get_state().var << ")" << std::endl;
+  // dir_concentration(shared_tables.size()) = totalmass_hdp;
+  // Eigen::VectorXd weights = stan::math::dirichlet_rng(dir_concentration,
+  // rng);
+
+  // TruncatedSBMixing hdp_cond_mixing;
+  // bayesmix::TruncSBPrior* hdp_mix_prior =
+  //     google::protobuf::internal::down_cast<bayesmix::TruncSBPrior*>(
+  //         hdp_cond_mixing.get_mutable_prior());
+  // hdp_mix_prior->mutable_dp_prior()->set_totalmass(totalmass_hdp);
+  // hdp_mix_prior->set_num_components(10);
+  // hdp_cond_mixing.initialize();
+
+  // shared_conditional_weights.resize(weights.size() - 1 + 10);
+  // shared_conditional_weights.head(weights.size() - 1) =
+  //     weights.head(weights.size() - 1);
+
+  // shared_conditional_weights.tail(10) =
+  //     hdp_cond_mixing.get_weights(false, false) * weights(weights.size() -
+  //     1);
+
+  // shared_conditional_atoms.resize(shared_conditional_weights.size());
+  // for (int i = 0; i < shared_tables.size(); i++) {
+  //   shared_conditional_atoms[i] = shared_tables[i]->clone();
+  // }
+  // for (int i = shared_tables.size(); i < shared_conditional_weights.size();
+  //      i++) {
+  //   shared_conditional_atoms[i] = G00_master_hierarchy->clone();
+  //   shared_conditional_atoms[i]->sample_prior();
   // }
 
   for (int r = 0; r < ngroups; r++) {
-    // std::cout << "is_used_rest: " << is_used_rest[r] << std::endl;
+    // std::cout << "r: " << r << ", is_used_rest: " << is_used_rest[r]
+    //           << std::endl;
     std::vector<int> table_cnts =
         is_used_rest[r] ? n_by_table[r] : n_by_table_pseudo[r];
     std::vector<std::shared_ptr<AbstractHierarchy>> table_vals =
@@ -567,65 +555,64 @@ void SemiHdpSampler::sample_conditional_measures() {
     // std::cout << "table_cnts: " << table_cnts.size()
     //           << ", table_vals: " << table_vals.size() << std::endl;
 
-    dir_concentration.resize(table_cnts.size() + 1);
+    int n1 = table_cnts.size();
+    Eigen::VectorXd dir_concentration(n1 + 1);
     for (int i = 0; i < table_vals.size(); i++) {
       dir_concentration(i) = table_cnts[i];
     }
     dir_concentration(table_cnts.size()) = totalmass_rest;
-    weights = stan::math::dirichlet_rng(dir_concentration, rng);
+    Eigen::VectorXd weights =
+        stan::math::dirichlet_rng(dir_concentration, rng);
+    DirichletProcess prior_dp;
+    Eigen::VectorXd residual_weights = prior_dp.simulate_stickbreak_threshold(
+        totalmass_rest, 1e-4 / weights(n1));
+    int n2 = residual_weights.size();
 
-    TruncatedSBMixing rest_cond_mixing;
-    bayesmix::TruncSBPrior* rest_mix_prior =
-        google::protobuf::internal::down_cast<bayesmix::TruncSBPrior*>(
-            rest_cond_mixing.get_mutable_prior());
+    // std::cout << "r: " << r
+    //           << ", residual_weights: " << residual_weights.size()
+    //           << ", n_by_table: " << table_cnts.size()
+    //           << ", rest_tables: " << table_vals.size() << std::endl;
 
-    rest_mix_prior->mutable_dp_prior()->set_totalmass(totalmass_rest);
-    rest_mix_prior->set_num_components(10);
-    rest_cond_mixing.initialize();
-
-    conditional_weights[r].resize(weights.size() - 1 + 10);
-    conditional_weights[r].head(weights.size() - 1) =
-        weights.head(weights.size() - 1);
-    conditional_weights[r].tail(10) =
-        rest_cond_mixing.get_weights(false, false) *
-        weights(weights.size() - 1);
-
+    conditional_weights[r].resize(n1 + residual_weights.size());
+    conditional_weights[r].head(n1) = weights.head(n1);
+    conditional_weights[r].tail(n2) = residual_weights;
     conditional_atoms[r].resize(conditional_weights[r].size());
+
+    // std::cout << "table_cnts: " << table_cnts.size() << std::endl;
+    // std::cout << "conditional weights: " << conditional_weights[r].size()
+    //           << std::endl;
+
     for (int i = 0; i < table_cnts.size(); i++) {
       conditional_atoms[r][i] = table_vals[i]->clone();
+      std::shared_ptr<NNIGHierarchy> atom_ptr =
+          std::dynamic_pointer_cast<NNIGHierarchy>(conditional_atoms[r][i]);
     }
+
     for (int i = table_cnts.size(); i < conditional_weights[r].size(); i++) {
       bool to_idio = stan::math::bernoulli_rng(semihdp_weight, rng);
       if (to_idio) {
         conditional_atoms[r][i] = G0_master_hierarchy->clone();
         conditional_atoms[r][i]->sample_prior();
       } else {
-        int comp = bayesmix::categorical_rng(shared_conditional_weights, rng);
-        conditional_atoms[r][i] = shared_conditional_atoms[comp]->clone();
+        conditional_atoms[r][i] = shared_dp.draw();
       }
+      std::shared_ptr<NNIGHierarchy> atom_ptr =
+          std::dynamic_pointer_cast<NNIGHierarchy>(conditional_atoms[r][i]);
     }
 
-    // std::cout << "dirichlet weights: " << dir_concentration.transpose()
-    //           << std::endl;
-    // std::cout << "unique values: ";
-    // for (int i = 0; i < rest_tables[r].size(); i++) {
-    //   std::shared_ptr<NNIGHierarchy> atom_ptr;
-    //   atom_ptr =
-    //   std::dynamic_pointer_cast<NNIGHierarchy>(rest_tables[r][i]); std::cout
-    //   << "(" << atom_ptr->get_state().mean << ", "
-    //             << atom_ptr->get_state().var << ")     ";
-    // }
-    // std::cout << std::endl;
-    // std::cout << "F_r: " << std::endl;
-    // for (int i = 0; i < conditional_weights[r].size(); i++) {
-    //   std::shared_ptr<NNIGHierarchy> atom_ptr;
-    //   atom_ptr =
+    // std::cout << "H2 r: " << r << std::endl;
+    // for (int i = 0; i < conditional_atoms[r].size(); i++) {
+    //   std::shared_ptr<NNIGHierarchy> atom_ptr =
     //       std::dynamic_pointer_cast<NNIGHierarchy>(conditional_atoms[r][i]);
-    //   std::cout << "w: " << conditional_weights[r](i) << ", atom: ("
-    //             << atom_ptr->get_state().mean << ", "
-    //             << atom_ptr->get_state().var << ")" << std::endl;
+    //   std::cout << conditional_weights[r](i) << "("
+    //             << atom_ptr->get_state().mean << ","
+    //             << atom_ptr->get_state().var << ")"
+    //             << "     ";
     // }
+    // std::cout << std::endl << std::endl;
   }
+  // std::cout << std::endl << std::endl;
+
   // std::cout << "sample_conditional_measures DONE" << std::endl;
 }
 

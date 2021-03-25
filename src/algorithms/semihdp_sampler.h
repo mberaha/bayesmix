@@ -95,7 +95,7 @@ class SemiHdpSampler {
 
   void step() {
     update_unique_vals();
-    // update_semihdp_weight();
+    update_semihdp_weight();
     if (!adapt) {
       sample_pseudo_prior();
       update_rest_allocs();
